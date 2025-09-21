@@ -2,11 +2,10 @@
 
 import { useWallet } from "@solana/wallet-adapter-react";
 import { mintCompressedNFT } from "@/lib/mintCompressedNFT";
-import { useState, useCallback, useMemo } from "react";
-import MetaplexLogo from "@/assets/logos/metaplex-logo.png";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import Header from "@/components/header";
 
-// --- IPFS helpers (gateway + fallback) ---
+/* -------------------- IPFS helpers (gateway + fallback) -------------------- */
 const IPFS_GATEWAYS = [
   "https://ipfs.io/ipfs/",
   "https://cloudflare-ipfs.com/ipfs/",
@@ -14,7 +13,6 @@ const IPFS_GATEWAYS = [
 ];
 
 function ipfsToHttp(ipfsUri: string, gwIndex = 0) {
-  // Accept ipfs://CID/path OR plain CID/path
   const path = ipfsUri.replace(/^ipfs:\/\//, "");
   return `${IPFS_GATEWAYS[gwIndex]}${path}`;
 }
@@ -25,50 +23,63 @@ function IpfsImage({
   className,
   forcePngFromJson = false,
 }: {
-  ipfsUri: string; // can be ipfs://... or CID/...
+  ipfsUri: string;
   alt: string;
   className?: string;
-  /** If true, replace .json with .png for preview tiles */
   forcePngFromJson?: boolean;
 }) {
   const [gw, setGw] = useState(0);
+  const [loaded, setLoaded] = useState(false);
   const httpSrc = useMemo(() => {
     const raw = forcePngFromJson ? ipfsUri.replace(".json", ".png") : ipfsUri;
     return ipfsToHttp(raw, gw);
   }, [ipfsUri, gw, forcePngFromJson]);
 
   return (
-    <img
-      src={httpSrc}
-      alt={alt}
-      className={className}
-      onError={() => {
-        if (gw < IPFS_GATEWAYS.length - 1) setGw(gw + 1);
-      }}
-    />
+    <div className={`relative ${className || ""}`}>
+      {!loaded && (
+        <div className="absolute inset-0 animate-pulse rounded-xl bg-gradient-to-br from-slate-200/40 to-slate-300/40 dark:from-slate-700/40 dark:to-slate-800/40" />
+      )}
+      <img
+        src={httpSrc}
+        alt={alt}
+        className={`h-full w-full rounded-xl object-cover transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
+        onLoad={() => setLoaded(true)}
+        onError={() => {
+          if (gw < IPFS_GATEWAYS.length - 1) setGw(gw + 1);
+        }}
+      />
+    </div>
   );
 }
 
-// Duplicate METADATA_URIS for previews (or export from lib and import)
+/* ---------------------------- Collection Metadata --------------------------- */
 const METADATA_URIS = [
   "ipfs://bafybeifikwvqllaf2yzonmm4seorkhlkshjtcqopog24rq75einzf6hp4a/variant-a.json",
   "ipfs://bafybeifikwvqllaf2yzonmm4seorkhlkshjtcqopog24rq75einzf6hp4a/variant-b.json",
   "ipfs://bafybeifikwvqllaf2yzonmm4seorkhlkshjtcqopog24rq75einzf6hp4a/variant-c.json",
 ];
 
+/* --------------------------------- Page --------------------------------- */
 export default function Home() {
   const { connected, connect, disconnect, publicKey } = useWallet();
   const [loading, setLoading] = useState(false);
   const [mintResult, setMintResult] = useState<{
     signature: string;
-    uri: string; // metadata URI returned by mint
+    uri: string;
     explorerUrl: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [lastClickTime, setLastClickTime] = useState(0); // For debouncing
+  const [notice, setNotice] = useState<string | null>(null);
+  const [lastClickTime, setLastClickTime] = useState(0);
 
-  // Derive minted image (assumes metadata uses same filename w/ .png).
-  // If your metadata's `image` field points elsewhere, you can fetch it client-side and use that URL instead.
+  useEffect(() => {
+    if (notice) {
+      const t = setTimeout(() => setNotice(null), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [notice]);
+
   const mintedImageHttp = useMemo(() => {
     if (!mintResult?.uri) return null;
     const imgLike = mintResult.uri.endsWith(".json")
@@ -80,174 +91,297 @@ export default function Home() {
   const handleMint = useCallback(async () => {
     const now = Date.now();
     if (now - lastClickTime < 3000) {
-      console.warn("⚠️ [page.tsx] Mint button clicked too soon. Please wait.");
-      setError("Please wait a few seconds before minting again.");
+      setNotice("Please wait a moment before minting again.");
       return;
     }
     setLastClickTime(now);
-    console.log("🔄 [page.tsx] Mint button clicked at", new Date().toISOString());
 
     if (!connected) {
-      console.log("🔍 [page.tsx] Wallet not connected. Triggering connect...");
       try {
         await connect();
-        console.log("✅ [page.tsx] Wallet connect initiated.");
       } catch (err) {
-        console.error("❌ [page.tsx] Wallet connect failed:", err);
         setError("Failed to connect wallet.");
       }
       return;
     }
 
-    console.log("🚀 [page.tsx] Starting mint process for wallet:", publicKey?.toBase58());
     setLoading(true);
     setError(null);
     setMintResult(null);
+
     try {
       const result = await mintCompressedNFT();
-      console.log("✅ [page.tsx] Mint successful:", result);
       setMintResult(result);
     } catch (err: any) {
-      console.error("❌ [page.tsx] Mint failed:", err?.message, err?.stack);
       setError(err?.message ?? "Mint failed");
     } finally {
-      console.log("🏁 [page.tsx] Mint process completed.");
       setLoading(false);
     }
-  }, [connected, connect, publicKey, lastClickTime]);
+  }, [connected, connect, lastClickTime]);
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-between p-24">
+    <div className="relative min-h-screen overflow-hidden bg-slate-50 text-slate-900 dark:bg-[#0a0b10] dark:text-slate-100">
+      {/* Animated gradient blobs */}
+      <div className="pointer-events-none absolute inset-0 -z-10">
+        <div className="absolute -top-32 -left-24 h-80 w-80 rounded-full bg-gradient-to-br from-indigo-400/30 via-sky-400/30 to-cyan-400/30 blur-3xl dark:from-indigo-600/20 dark:via-sky-600/20 dark:to-cyan-600/20 animate-[pulse_9s_ease-in-out_infinite]" />
+        <div className="absolute -bottom-40 -right-24 h-[28rem] w-[28rem] rounded-full bg-gradient-to-tr from-fuchsia-400/30 via-violet-400/30 to-indigo-400/30 blur-3xl dark:from-fuchsia-600/20 dark:via-violet-600/20 dark:to-indigo-600/20 animate-[pulse_11s_ease-in-out_infinite]" />
+      </div>
+
       <Header />
 
-      <div className="relative z-[-1] flex place-items-center before:absolute before:h-[300px] before:w-[480px] before:-translate-x-1/2 before:rounded-full before:bg-gradient-radial before:from-white before:to-transparent before:blur-2xl before:content-[''] after:absolute after:-z-20 after:h-[180px] after:w-[240px] after:translate-x-1/3 after:bg-gradient-conic after:from-sky-200 after:via-blue-200 after:blur-2xl after:content-[''] before:dark:bg-gradient-to-br before:dark:from-transparent before:dark:to-blue-700 before:dark:opacity-10 after:dark:from-sky-900 after:dark:via-[#0141ff] after:dark:opacity-40">
-        <img
-          className="relative dark:drop-shadow-[0_0_0.3rem_#ffffff70] dark:invert"
-          src={MetaplexLogo.src}
-          alt="Metaplex Logo"
-          width={500}
-        />
-      </div>
-
-      <div className="mb-32 flex flex-col items-center justify-center text-center lg:w-full lg:max-w-5xl lg:flex-col lg:text-left">
-        <h1 className="text-4xl font-bold mb-4 text-gray-900 dark:text-white">
-          Mint Subscriber Giveaway NFT
-        </h1>
-        <p className="mb-8 text-lg text-gray-600 dark:text-gray-300 max-w-md text-center">
-          Connect your wallet and mint one of 3 random variants from a 100,000 supply collection on Solana (devnet).
-        </p>
-
-        {/* Mint Button */}
-        <button
-          onClick={handleMint}
-          disabled={!connected || loading}
-          className="group rounded-lg border border-transparent px-8 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30 disabled:opacity-50 bg-blue-500 hover:bg-blue-600 text-white font-semibold shadow-lg"
-        >
-          {loading ? (
-            <span className="flex items-center">
-              Minting...
-              <div className="ml-2 animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-            </span>
-          ) : connected ? (
-            "Mint NFT (Free on Devnet)"
-          ) : (
-            "Connect Wallet"
-          )}
-        </button>
-
-        {/* Error Display */}
-        {error && (
-          <div className="mt-4 p-4 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-lg max-w-md text-center">
-            {error}
-            <button onClick={() => setError(null)} className="ml-2 underline">
-              Dismiss
-            </button>
-          </div>
-        )}
-
-        {/* Success Display */}
-        {mintResult && (
-          <div className="mt-6 p-6 bg-green-100 dark:bg-green-900 rounded-lg max-w-md text-center">
-            <h3 className="font-semibold mb-2">Minted Successfully!</h3>
-            <p>
-              Variant:{" "}
-              <strong>
-                {mintResult.uri.split("/").pop()?.replace(".json", "") || "Unknown"}
-              </strong>
-            </p>
-            <p className="mb-4">
-              Signature:{" "}
-              <code className="bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded text-sm">
-                {mintResult.signature.slice(0, 8)}...
-              </code>
+      <main className="mx-auto flex w-full max-w-7xl flex-col items-center px-6 pb-24 pt-10 sm:px-8 lg:px-12">
+        {/* Hero */}
+        <section className="relative w-full">
+          <div className="mx-auto max-w-3xl text-center">
+            <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/60 px-3 py-1 text-xs font-medium text-slate-700 backdrop-blur dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              Live on Devnet • 100,000 Supply
+            </div>
+            <h1 className="mt-4 text-4xl font-extrabold tracking-tight sm:text-5xl lg:text-6xl">
+              Mint Subscriber Giveaway NFT
+            </h1>
+            <p className="mx-auto mt-4 max-w-2xl text-base text-slate-600 dark:text-slate-300 sm:text-lg">
+              Connect your wallet to mint one of 3 randomized variants from our compressed NFT collection on Solana.
             </p>
 
-            {/* Minted image preview with IPFS gateway */}
-            {mintedImageHttp && (
-              <div className="mb-4">
-                <img
-                  src={mintedImageHttp}
-                  alt="Minted NFT"
-                  className="w-40 h-40 object-cover rounded mx-auto"
-                  onError={(e) => {
-                    // Try fallback gateways if initial one fails
-                    for (let i = 1; i < IPFS_GATEWAYS.length; i++) {
-                      const altUrl = ipfsToHttp(
-                        mintResult.uri.replace(".json", ".png"),
-                        i
-                      );
-                      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-                      // @ts-ignore
-                      if (e.currentTarget.dataset.tried !== String(i)) {
-                        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-                        // @ts-ignore
-                        e.currentTarget.dataset.tried = String(i);
-                        e.currentTarget.setAttribute("src", altUrl);
-                        break;
-                      }
-                    }
-                  }}
-                />
+            {/* CTA + Wallet Badge */}
+            <div className="mt-8 flex flex-col items-center justify-center gap-4 sm:flex-row">
+              <button
+                onClick={handleMint}
+                disabled={loading}
+                className="group relative inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-tr from-indigo-600 to-sky-500 px-7 py-3 font-semibold text-white shadow-lg shadow-indigo-600/30 transition hover:scale-[1.02] hover:shadow-indigo-600/40 active:scale-[0.99] disabled:opacity-60"
+              >
+                {loading && (
+                  <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-b-transparent" />
+                )}
+                {loading ? "Minting..." : connected ? "Mint NFT (Free)" : "Connect Wallet & Mint"}
+              </button>
+
+              <div className="rounded-2xl border border-slate-200/60 bg-white/60 px-4 py-2 text-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
+                {connected ? (
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
+                    Connected:{" "}
+                    <span className="font-mono">
+                      {publicKey?.toBase58().slice(0, 4)}…{publicKey?.toBase58().slice(-4)}
+                    </span>
+                    <button
+                      onClick={disconnect}
+                      className="ml-2 rounded-lg px-2 py-1 text-xs text-rose-400 hover:bg-rose-400/10"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
+                    <span className="inline-block h-2 w-2 rounded-full bg-slate-400" />
+                    Wallet not connected
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Inline toast */}
+            {(notice || error) && (
+              <div
+                className={`mx-auto mt-4 max-w-md rounded-2xl border px-4 py-3 text-sm backdrop-blur ${
+                  error
+                    ? "border-rose-300/40 bg-rose-50/70 text-rose-800 dark:border-rose-300/20 dark:bg-rose-900/30 dark:text-rose-200"
+                    : "border-amber-300/40 bg-amber-50/70 text-amber-800 dark:border-amber-300/20 dark:bg-amber-900/30 dark:text-amber-200"
+                }`}
+              >
+                {error || notice}
               </div>
             )}
-
-            <a
-              href={mintResult.explorerUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-            >
-              View on Explorer
-            </a>
           </div>
-        )}
+        </section>
 
-        {/* Wallet Status */}
-        {connected && (
-          <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">
-            Connected: {publicKey?.toBase58().slice(0, 4)}...
-            {publicKey?.toBase58().slice(-4)}
-            <button onClick={disconnect} className="ml-4 text-red-500 underline">
-              Disconnect
-            </button>
-          </p>
-        )}
+        {/* Content Grid */}
+        <section className="mt-12 grid w-full grid-cols-1 items-start gap-8 lg:mt-16 lg:grid-cols-12">
+          {/* Mint Card */}
+          <div className="lg:col-span-5">
+            <div className="relative overflow-hidden rounded-3xl border border-slate-200/60 bg-white/70 p-6 shadow-xl shadow-slate-900/5 backdrop-blur dark:border-white/10 dark:bg-white/5">
+              <div className="pointer-events-none absolute -right-10 -top-10 h-40 w-40 rounded-full bg-gradient-to-br from-indigo-500/20 via-sky-500/20 to-cyan-500/20 blur-2xl" />
+              <h3 className="text-xl font-semibold">Your Mint</h3>
+              <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                When mint completes, your NFT preview appears below. View transaction on Solana Explorer anytime.
+              </p>
 
-        {/* Variant Previews (using PNGs derived from metadata filenames) */}
-        <div className="mt-8 grid grid-cols-3 gap-4 w-full max-w-md">
-          {METADATA_URIS.map((uri, i) => (
-            <div key={i} className="text-center">
-              <IpfsImage
-                ipfsUri={uri}
-                forcePngFromJson
-                alt={`Variant ${i + 1}`}
-                className="w-20 h-20 object-cover rounded mx-auto mb-1"
-              />
-              <p className="text-xs text-gray-600 dark:text-gray-300">Variant {i + 1}</p>
+              <div className="mt-5 grid grid-cols-1 gap-4">
+                {/* Minted image preview */}
+                {mintResult ? (
+                  <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-4 backdrop-blur dark:border-white/10 dark:bg-white/10">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                          Variant
+                        </div>
+                        <div className="font-semibold">
+                          {mintResult.uri.split("/").pop()?.replace(".json", "") || "Unknown"}
+                        </div>
+                      </div>
+                      <code className="rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                        {mintResult.signature.slice(0, 10)}…
+                      </code>
+                    </div>
+
+                    {mintedImageHttp && (
+                      <div className="mt-4">
+                        <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-2 backdrop-blur dark:border-white/10 dark:bg-white/10">
+                          <img
+                            src={mintedImageHttp}
+                            alt="Minted NFT"
+                            className="mx-auto h-56 w-full rounded-xl object-cover"
+                            onError={(e) => {
+                              for (let i = 1; i < IPFS_GATEWAYS.length; i++) {
+                                const altUrl = ipfsToHttp(
+                                  mintResult.uri.replace(".json", ".png"),
+                                  i
+                                );
+                                // @ts-ignore
+                                if (e.currentTarget.dataset.tried !== String(i)) {
+                                  // @ts-ignore
+                                  e.currentTarget.dataset.tried = String(i);
+                                  e.currentTarget.setAttribute("src", altUrl);
+                                  break;
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <a
+                      href={mintResult.explorerUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-4 inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+                    >
+                      View on Explorer
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className="h-4 w-4"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 3h7m0 0v7m0-7L10 14" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 10v11h11" />
+                      </svg>
+                    </a>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-slate-300/70 p-8 text-center dark:border-slate-600/50">
+                    <div className="mx-auto h-40 max-w-[16rem] rounded-xl bg-gradient-to-br from-slate-200/60 to-slate-300/60 backdrop-blur dark:from-slate-700/40 dark:to-slate-800/40" />
+                    <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                      No mint yet. Click <span className="font-semibold">Mint</span> to get your NFT.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Tiny facts */}
+              <div className="mt-6 grid grid-cols-3 gap-3 text-center text-xs">
+                <div className="rounded-xl border border-slate-200/60 bg-white/60 px-3 py-2 backdrop-blur dark:border-white/10 dark:bg-white/5">
+                  <div className="font-semibold">cNFT</div>
+                  <div className="text-slate-500 dark:text-slate-400">Compressed</div>
+                </div>
+                <div className="rounded-xl border border-slate-200/60 bg-white/60 px-3 py-2 backdrop-blur dark:border-white/10 dark:bg-white/5">
+                  <div className="font-semibold">Random</div>
+                  <div className="text-slate-500 dark:text-slate-400">1 of 3</div>
+                </div>
+                <div className="rounded-xl border border-slate-200/60 bg-white/60 px-3 py-2 backdrop-blur dark:border-white/10 dark:bg-white/5">
+                  <div className="font-semibold">Free</div>
+                  <div className="text-slate-500 dark:text-slate-400">Devnet</div>
+                </div>
+              </div>
             </div>
-          ))}
-        </div>
-      </div>
-    </main>
+          </div>
+
+          {/* Preview Gallery + Steps */}
+          <div className="lg:col-span-7">
+            <div className="grid grid-cols-1 gap-8">
+              {/* Variant Previews */}
+              <div>
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-lg font-semibold">Preview Variants</h3>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    Images served via resilient IPFS gateway fallback
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                  {METADATA_URIS.map((uri, i) => (
+                    <div
+                      key={i}
+                      className="group relative overflow-hidden rounded-2xl border border-slate-200/60 bg-white/70 p-2 shadow-sm shadow-slate-900/5 transition hover:-translate-y-0.5 hover:shadow-md backdrop-blur dark:border-white/10 dark:bg-white/5"
+                    >
+                      <div className="relative h-40 w-full">
+                        <IpfsImage
+                          ipfsUri={uri}
+                          forcePngFromJson
+                          alt={`Variant ${i + 1}`}
+                          className="h-full w-full"
+                        />
+                        <div className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-inset ring-white/40" />
+                      </div>
+                      <div className="mt-2 flex items-center justify-between">
+                        <p className="text-xs text-slate-600 dark:text-slate-300">Variant {i + 1}</p>
+                        <span className="rounded-md bg-slate-900/90 px-2 py-0.5 text-[10px] font-medium text-white dark:bg-white/10">
+                          cNFT
+                        </span>
+                      </div>
+                      <div className="absolute inset-0 -z-10 opacity-0 blur-2xl transition group-hover:opacity-40">
+                        <div className="h-full w-full bg-gradient-to-br from-indigo-500/40 via-sky-500/40 to-cyan-500/40" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Steps / How it works */}
+              <div className="overflow-hidden rounded-3xl border border-slate-200/60 bg-white/70 p-6 backdrop-blur dark:border-white/10 dark:bg-white/5">
+                <h3 className="text-lg font-semibold">How it works</h3>
+                <ol className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+                  <li className="rounded-xl border border-slate-200/60 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+                    <div className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Step 1
+                    </div>
+                    <div className="mt-1 font-medium">Connect Wallet</div>
+                    <p className="mt-1 text-slate-600 dark:text-slate-300">
+                      We support Solana wallets via Wallet Adapter.
+                    </p>
+                  </li>
+                  <li className="rounded-xl border border-slate-200/60 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+                    <div className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Step 2
+                    </div>
+                    <div className="mt-1 font-medium">Mint</div>
+                    <p className="mt-1 text-slate-600 dark:text-slate-300">
+                      One click mints a random variant (free on Devnet).
+                    </p>
+                  </li>
+                  <li className="rounded-xl border border-slate-200/60 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+                    <div className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Step 3
+                    </div>
+                    <div className="mt-1 font-medium">View & Share</div>
+                    <p className="mt-1 text-slate-600 dark:text-slate-300">
+                      Preview appears here. Open on Explorer to verify.
+                    </p>
+                  </li>
+                </ol>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Footer note */}
+        <section className="mt-14 w-full text-center text-xs text-slate-500 dark:text-slate-400">
+          Built with IPFS gateway fallback for resilient media loading.
+        </section>
+      </main>
+    </div>
   );
 }
