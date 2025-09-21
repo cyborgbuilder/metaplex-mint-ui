@@ -12,44 +12,153 @@ const IPFS_GATEWAYS = [
   "https://gateway.pinata.cloud/ipfs/",
 ];
 
-function ipfsToHttp(ipfsUri: string, gwIndex = 0) {
-  const path = ipfsUri.replace(/^ipfs:\/\//, "");
+function ipfsToHttp(ipfsUriOrPath: string, gwIndex = 0) {
+  // Accept: ipfs://CID/path OR CID/path
+  const path = ipfsUriOrPath.replace(/^ipfs:\/\//, "");
   return `${IPFS_GATEWAYS[gwIndex]}${path}`;
 }
 
-function IpfsImage({
-  ipfsUri,
+/* ----------------------- Safer metadata-driven image ----------------------- */
+type ResolvedImage = {
+  httpUrl: string;
+  tried: string[]; // helpful for debugging in console
+};
+
+async function resolveImageFromMetadata(
+  metadataIpfs: string
+): Promise<string | null> {
+  // try gateways in order until metadata fetch succeeds
+  const tried: string[] = [];
+  for (let g = 0; g < IPFS_GATEWAYS.length; g++) {
+    const url = ipfsToHttp(metadataIpfs, g);
+    tried.push(url);
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) continue;
+      const json = await res.json();
+
+      // Common fields: image, image_url, properties.files[0].uri
+      let img: string | undefined =
+        json.image || json.image_url ||
+        json?.properties?.files?.[0]?.uri ||
+        json?.properties?.files?.[0]?.url;
+
+      if (typeof img === "string" && img.length > 0) {
+        return img;
+      }
+    } catch {
+      // try next gateway
+    }
+  }
+
+  // If JSON fetch failed, return null to allow caller to guess fallbacks
+  console.warn("[resolveImageFromMetadata] failed for", metadataIpfs, "tried:", tried);
+  return null;
+}
+
+async function resolveImageHttp(
+  metadataIpfs: string
+): Promise<ResolvedImage | null> {
+  // 1) Prefer metadata->image field
+  const metaImg = await resolveImageFromMetadata(metadataIpfs);
+
+  const candidateIpfsUrls: string[] = [];
+  if (metaImg) {
+    candidateIpfsUrls.push(metaImg);
+  }
+
+  // 2) Fallbacks if image wasn’t present or metadata unreachable:
+  //    try swapping .json → common image extensions
+  const base = metadataIpfs.replace(/\.json$/i, "");
+  const exts = [".png", ".jpg", ".jpeg", ".webp"];
+  for (const ext of exts) candidateIpfsUrls.push(base + ext);
+
+  // 3) Try each candidate across gateways
+  const tried: string[] = [];
+  for (const ipfsLike of candidateIpfsUrls) {
+    for (let g = 0; g < IPFS_GATEWAYS.length; g++) {
+      const httpUrl = ipfsToHttp(ipfsLike, g);
+      tried.push(httpUrl);
+      try {
+        const headRes = await fetch(httpUrl, { method: "HEAD", cache: "no-store" });
+        if (headRes.ok) return { httpUrl, tried };
+      } catch {
+        // keep trying
+      }
+    }
+  }
+
+  console.warn("[resolveImageHttp] could not resolve image for", metadataIpfs, "tried:", tried);
+  return null;
+}
+
+/* ----------------------------- Display component ---------------------------- */
+function MetadataImage({
+  metadataIpfsUri,
   alt,
   className,
-  forcePngFromJson = false,
 }: {
-  ipfsUri: string;
+  metadataIpfsUri: string;
   alt: string;
   className?: string;
-  forcePngFromJson?: boolean;
 }) {
-  const [gw, setGw] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-  const httpSrc = useMemo(() => {
-    const raw = forcePngFromJson ? ipfsUri.replace(".json", ".png") : ipfsUri;
-    return ipfsToHttp(raw, gw);
-  }, [ipfsUri, gw, forcePngFromJson]);
+  const [url, setUrl] = useState<string | null>(null);
+  const [debugList, setDebugList] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      setLoading(true);
+      const resolved = await resolveImageHttp(metadataIpfsUri);
+      if (!mounted) return;
+      if (resolved) {
+        setUrl(resolved.httpUrl);
+        setDebugList(resolved.tried);
+        console.debug("[MetadataImage] resolved", { metadataIpfsUri, ...resolved });
+      } else {
+        setUrl(null);
+        setDebugList([]);
+      }
+      setLoading(false);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [metadataIpfsUri]);
+
+  if (loading) {
+    return (
+      <div className={`relative ${className || ""}`}>
+        <div className="absolute inset-0 animate-pulse rounded-xl bg-gradient-to-br from-slate-200/40 to-slate-300/40 dark:from-slate-700/40 dark:to-slate-800/40" />
+        <div className="invisible h-full w-full rounded-xl" />
+      </div>
+    );
+  }
+
+  if (!url) {
+    return (
+      <div className={`flex items-center justify-center rounded-xl border border-dashed border-slate-300/70 p-4 text-center text-xs text-slate-500 dark:border-slate-700/70 dark:text-slate-400 ${className || ""}`}>
+        Image not available
+      </div>
+    );
+  }
 
   return (
-    <div className={`relative ${className || ""}`}>
-      {!loaded && (
-        <div className="absolute inset-0 animate-pulse rounded-xl bg-gradient-to-br from-slate-200/40 to-slate-300/40 dark:from-slate-700/40 dark:to-slate-800/40" />
-      )}
-      <img
-        src={httpSrc}
-        alt={alt}
-        className={`h-full w-full rounded-xl object-cover transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
-        onLoad={() => setLoaded(true)}
-        onError={() => {
-          if (gw < IPFS_GATEWAYS.length - 1) setGw(gw + 1);
-        }}
-      />
-    </div>
+    <img
+      src={url}
+      alt={alt}
+      className={`h-full w-full rounded-xl object-cover ${className || ""}`}
+      crossOrigin="anonymous"
+      referrerPolicy="no-referrer"
+      onError={() => {
+        // If the image fails at runtime (e.g., gateway hiccup), force re-resolve next paint
+        setUrl(null);
+        setLoading(true);
+        // Trigger a new resolve by updating state with same prop
+        setTimeout(() => setLoading(false), 0);
+      }}
+    />
   );
 }
 
@@ -80,12 +189,15 @@ export default function Home() {
     }
   }, [notice]);
 
-  const mintedImageHttp = useMemo(() => {
+  const mintedImageUrl = useMemo(() => {
+    // We’ll still show a best-effort image for the minted card by
+    // guessing .json → .png (user sees success fast). If it fails,
+    // the <img onError> handler will re-resolve via gateways anyway.
     if (!mintResult?.uri) return null;
-    const imgLike = mintResult.uri.endsWith(".json")
+    const guess = (mintResult.uri.endsWith(".json")
       ? mintResult.uri.replace(".json", ".png")
-      : mintResult.uri;
-    return ipfsToHttp(imgLike, 0);
+      : mintResult.uri);
+    return ipfsToHttp(guess, 0);
   }, [mintResult?.uri]);
 
   const handleMint = useCallback(async () => {
@@ -99,7 +211,7 @@ export default function Home() {
     if (!connected) {
       try {
         await connect();
-      } catch (err) {
+      } catch {
         setError("Failed to connect wallet.");
       }
       return;
@@ -137,7 +249,7 @@ export default function Home() {
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
               Live on Devnet • 100,000 Supply
             </div>
-            <h1 className="mt-4 text-4xl font-extrabold tracking-tight sm:text-5xl lg:text-6xl">
+            <h1 className="mt-4 bg-gradient-to-tr from-indigo-300 via-sky-300 to-cyan-300 bg-clip-text text-4xl font-extrabold tracking-tight text-transparent sm:text-5xl lg:text-6xl">
               Mint Subscriber Giveaway NFT
             </h1>
             <p className="mx-auto mt-4 max-w-2xl text-base text-slate-600 dark:text-slate-300 sm:text-lg">
@@ -149,7 +261,7 @@ export default function Home() {
               <button
                 onClick={handleMint}
                 disabled={loading}
-                className="group relative inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-tr from-indigo-600 to-sky-500 px-7 py-3 font-semibold text-white shadow-lg shadow-indigo-600/30 transition hover:scale-[1.02] hover:shadow-indigo-600/40 active:scale-[0.99] disabled:opacity-60"
+                className="group relative inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-tr from-indigo-600 to-sky-500 px-7 py-3 font-semibold text-white shadow-lg shadow-indigo-600/30 transition hover:scale-[1.02] hover:shadow-indigo-600/40 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sky-500/40 active:scale-[0.99] disabled:opacity-60"
               >
                 {loading && (
                   <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-b-transparent" />
@@ -167,7 +279,7 @@ export default function Home() {
                     </span>
                     <button
                       onClick={disconnect}
-                      className="ml-2 rounded-lg px-2 py-1 text-xs text-rose-400 hover:bg-rose-400/10"
+                      className="ml-2 rounded-lg px-2 py-1 text-xs text-rose-400 hover:bg-rose-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/30"
                     >
                       Disconnect
                     </button>
@@ -181,7 +293,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Inline toast */}
             {(notice || error) && (
               <div
                 className={`mx-auto mt-4 max-w-md rounded-2xl border px-4 py-3 text-sm backdrop-blur ${
@@ -204,11 +315,10 @@ export default function Home() {
               <div className="pointer-events-none absolute -right-10 -top-10 h-40 w-40 rounded-full bg-gradient-to-br from-indigo-500/20 via-sky-500/20 to-cyan-500/20 blur-2xl" />
               <h3 className="text-xl font-semibold">Your Mint</h3>
               <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                When mint completes, your NFT preview appears below. View transaction on Solana Explorer anytime.
+                When mint completes, your NFT preview appears below. View the transaction on Solana Explorer.
               </p>
 
               <div className="mt-5 grid grid-cols-1 gap-4">
-                {/* Minted image preview */}
                 {mintResult ? (
                   <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-4 backdrop-blur dark:border-white/10 dark:bg-white/10">
                     <div className="flex items-center justify-between">
@@ -225,27 +335,24 @@ export default function Home() {
                       </code>
                     </div>
 
-                    {mintedImageHttp && (
+                    {mintedImageUrl && (
                       <div className="mt-4">
                         <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-2 backdrop-blur dark:border-white/10 dark:bg-white/10">
                           <img
-                            src={mintedImageHttp}
+                            src={mintedImageUrl}
                             alt="Minted NFT"
                             className="mx-auto h-56 w-full rounded-xl object-cover"
+                            crossOrigin="anonymous"
+                            referrerPolicy="no-referrer"
                             onError={(e) => {
-                              for (let i = 1; i < IPFS_GATEWAYS.length; i++) {
-                                const altUrl = ipfsToHttp(
-                                  mintResult.uri.replace(".json", ".png"),
-                                  i
-                                );
-                                // @ts-ignore
-                                if (e.currentTarget.dataset.tried !== String(i)) {
-                                  // @ts-ignore
-                                  e.currentTarget.dataset.tried = String(i);
-                                  e.currentTarget.setAttribute("src", altUrl);
-                                  break;
+                              // If guess fails, try other gateways/extensions by re-running resolver:
+                              (async () => {
+                                const fallback = await resolveImageHttp(mintResult.uri);
+                                if (fallback?.httpUrl) {
+                                  e.currentTarget.src = fallback.httpUrl;
+                                  console.debug("[Minted Preview Fallback] tried:", fallback.tried);
                                 }
-                              }
+                              })();
                             }}
                           />
                         </div>
@@ -256,7 +363,7 @@ export default function Home() {
                       href={mintResult.explorerUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="mt-4 inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+                      className="mt-4 inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-500/30 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
                     >
                       View on Explorer
                       <svg
@@ -308,7 +415,7 @@ export default function Home() {
                 <div className="mb-3 flex items-center justify-between">
                   <h3 className="text-lg font-semibold">Preview Variants</h3>
                   <span className="text-xs text-slate-500 dark:text-slate-400">
-                    Images served via resilient IPFS gateway fallback
+                    Metadata-driven, multi-gateway fallback
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
@@ -318,9 +425,8 @@ export default function Home() {
                       className="group relative overflow-hidden rounded-2xl border border-slate-200/60 bg-white/70 p-2 shadow-sm shadow-slate-900/5 transition hover:-translate-y-0.5 hover:shadow-md backdrop-blur dark:border-white/10 dark:bg-white/5"
                     >
                       <div className="relative h-40 w-full">
-                        <IpfsImage
-                          ipfsUri={uri}
-                          forcePngFromJson
+                        <MetadataImage
+                          metadataIpfsUri={uri}
                           alt={`Variant ${i + 1}`}
                           className="h-full w-full"
                         />
@@ -379,7 +485,7 @@ export default function Home() {
 
         {/* Footer note */}
         <section className="mt-14 w-full text-center text-xs text-slate-500 dark:text-slate-400">
-          Built with IPFS gateway fallback for resilient media loading.
+          Built with metadata-driven IPFS resolution and multi-gateway fallback.
         </section>
       </main>
     </div>
