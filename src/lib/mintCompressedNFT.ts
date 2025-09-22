@@ -1,12 +1,15 @@
 // src/lib/mintCompressedNFT.ts
 import { publicKey as umiPublicKey, PublicKey } from '@metaplex-foundation/umi';
-import { mintToCollectionV1 } from '@metaplex-foundation/mpl-bubblegum';
+import { mintToCollectionV1, mintV1 } from '@metaplex-foundation/mpl-bubblegum';
 import umiWithCurrentWalletAdapter from './umi/umiWithCurrentWalletAdapter';
 import sendAndConfirmWalletAdapter from './umi/sendAndConfirmWithWalletAdapter';
 
 /* -------------------------------- CONFIG -------------------------------- */
 export const TREE_ADDRESS: PublicKey = umiPublicKey('EpmQQngjpkqNpfrriw5JyXYbkUP6i1ph9h31vR2jEdvW'); // public tree
 export const COLLECTION_MINT: PublicKey = umiPublicKey('CPsXpcmo5B1os7Rr9FPNDj6oTwoCZqQ4S8QJAiQDJTSo'); // collection mint
+
+// Tree creator from your tree info
+export const TREE_CREATOR: PublicKey = umiPublicKey('44P1KCTk7dqLkZNFCdrYZ352Eps7bibSDqkpMYMLM3fG');
 
 export const METADATA_URIS = [
   'ipfs://bafybeifikwvqllaf2yzonmm4seorkhlkshjtcqopog24rq75einzf6hp4a/variant-a.json',
@@ -30,11 +33,6 @@ type SignatureLike =
   | unknown;
 
 function normalizeSignature(sigLike: SignatureLike): string {
-  // common cases:
-  // - string
-  // - [signature, slot]
-  // - { signature: string | [string, number] }
-  // - { txid: string | [string, number] }
   const fromArray = (a: unknown) =>
     Array.isArray(a) ? String(a[0]) : String(a);
 
@@ -47,7 +45,6 @@ function normalizeSignature(sigLike: SignatureLike): string {
     if (obj.txid !== undefined) return fromArray(obj.txid);
   }
 
-  // last resort
   return String(sigLike ?? '');
 }
 
@@ -75,15 +72,19 @@ export async function mintCompressedNFT(): Promise<MintCompressedResult> {
   console.log('ℹ️ [mintCompressedNFT] Merkle Tree:', merkleTree.toString());
   console.log('ℹ️ [mintCompressedNFT] Collection Mint:', collectionMint.toString());
   console.log('ℹ️ [mintCompressedNFT] Leaf Owner:', leafOwner.toString());
+  console.log('ℹ️ [mintCompressedNFT] Tree Creator:', TREE_CREATOR.toString());
 
   try {
-    // 4) Build tx (unverified collection so public mint works)
-    console.log('📝 [mintCompressedNFT] Building mintToCollectionV1 transaction (unverified collection)…');
-    const txBuilder = mintToCollectionV1(umi, {
+    // 4) Build tx - Use mint WITHOUT collection for public trees
+    console.log('📝 [mintCompressedNFT] Building mint transaction for public tree (NO collection)...');
+    
+    // Import the correct function for non-collection mints
+    const { mintV1 } = await import('@metaplex-foundation/mpl-bubblegum');
+    
+    const txBuilder = mintV1(umi, {
       leafOwner,
       leafDelegate: leafOwner,
       merkleTree,
-      collectionMint,
       metadata: {
         name: 'Subscriber Giveaway',
         symbol: 'SUB',
@@ -91,16 +92,16 @@ export async function mintCompressedNFT(): Promise<MintCompressedResult> {
         sellerFeeBasisPoints: 0,
         creators: [
           {
-            address: umiPublicKey('44P1KCTk7dqLkZNFCdrYZ352Eps7bibSDqkpMYMLM3fG'),
+            address: leafOwner, // Use minter as creator for public mints
             verified: true,
             share: 100,
           },
         ],
-        // Key: verified=false so we don't need collection authority sig on public mint
-        collection: { key: collectionMint, verified: false },
+        collection: null, // No collection for public minting
         uses: null,
       },
     });
+    
     console.log('✅ [mintCompressedNFT] Transaction built successfully.');
 
     // 5) Send & confirm
@@ -111,7 +112,6 @@ export async function mintCompressedNFT(): Promise<MintCompressedResult> {
     });
 
     const signature = normalizeSignature(
-      // prefer `raw.signature` if present, otherwise pass whole thing
       (raw as any)?.signature ?? raw
     );
 
@@ -142,6 +142,54 @@ export async function mintCompressedNFT(): Promise<MintCompressedResult> {
       }
     }
 
+    // If the above fails, try with collection but verified: false
+    if (error?.message?.includes('Collection') || error?.message?.includes('Authority')) {
+      console.log('🔄 [mintCompressedNFT] Retrying with mintToCollectionV1 but verified: false...');
+      
+      try {
+        const retryTxBuilder = mintToCollectionV1(umi, {
+          leafOwner,
+          leafDelegate: leafOwner,
+          merkleTree,
+          collectionMint,
+          metadata: {
+            name: 'Subscriber Giveaway',
+            symbol: 'SUB',
+            uri,
+            sellerFeeBasisPoints: 0,
+            creators: [
+              {
+                address: leafOwner, // Use minter as creator
+                verified: true,
+                share: 100,
+              },
+            ],
+            // Include collection but mark as unverified
+            collection: { key: collectionMint, verified: false },
+            uses: null,
+          },
+        });
+
+        const retryRaw = await sendAndConfirmWalletAdapter(retryTxBuilder, {
+          commitment: 'confirmed',
+          skipPreflight: false,
+        });
+
+        const retrySignature = normalizeSignature(
+          (retryRaw as any)?.signature ?? retryRaw
+        );
+
+        if (retrySignature) {
+          const retryExplorerUrl = `https://explorer.solana.com/tx/${retrySignature}?cluster=devnet`;
+          console.log('✅ [mintCompressedNFT] Retry successful! Signature:', retrySignature);
+          return { signature: retrySignature, uri, explorerUrl: retryExplorerUrl };
+        }
+      } catch (retryError: any) {
+        console.error('❌ [mintCompressedNFT] Retry also failed:', retryError?.message);
+        // Fall through to original error handling
+      }
+    }
+
     // Specific, human-friendly messages
     const msg = String(error?.message ?? '');
 
@@ -149,19 +197,19 @@ export async function mintCompressedNFT(): Promise<MintCompressedResult> {
       throw new Error('Duplicate instructions—remove manual priority fees.');
     }
     if (msg.includes('InvalidCollectionAuthority') || msg.includes('6028') || msg.includes('0x178c')) {
-      throw new Error('Collection authority issue—use verified: false for public minting.');
+      throw new Error('Collection authority issue. Try: 1) Remove collection entirely, or 2) Ensure collection is properly configured for public minting.');
     }
     if (msg.includes('TreeAuthorityIncorrect') || msg.includes('6016') || msg.includes('0x1780')) {
-      throw new Error('Tree not public—recreate with public: true.');
+      throw new Error('Tree authority issue. Even though tree shows as public, there may be a delegate/creator mismatch.');
     }
     if (msg.includes('Authority')) {
-      throw new Error('Authority mismatch—use verified: false.');
+      throw new Error('Authority mismatch—ensure you have permission to mint to this tree/collection.');
     }
     if (msg.includes('Collection')) {
-      throw new Error('Invalid collection mint—double-check COLLECTION_MINT.');
+      throw new Error('Collection issue—try minting without collection reference first.');
     }
     if (msg.includes('Tree')) {
-      throw new Error('Invalid Merkle tree—double-check TREE_ADDRESS.');
+      throw new Error('Tree configuration issue—verify tree permissions.');
     }
     if (msg.includes('User rejected')) {
       throw new Error('Mint cancelled: User rejected signature.');
